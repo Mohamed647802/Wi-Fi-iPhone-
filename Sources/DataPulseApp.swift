@@ -1,5 +1,4 @@
 import SwiftUI
-import BackgroundTasks
 
 @main
 struct DataPulseApp: App {
@@ -7,14 +6,7 @@ struct DataPulseApp: App {
     @Environment(\.scenePhase) private var phase
 
     init() {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: "com.datapulse.refresh", using: nil) { task in
-            DispatchQueue.main.async {
-                Store.shared.tick { task.setTaskCompleted(success: true) }
-                Scheduler.schedule()
-            }
-        }
         Loc.shared.start()
-        Scheduler.schedule()
     }
 
     var body: some Scene {
@@ -23,9 +15,10 @@ struct DataPulseApp: App {
                 .environmentObject(store)
                 .preferredColorScheme(.dark)
         }
-        .onChange(of: phase) { _ in
-            store.tick()
-            Scheduler.schedule()
+        .onChange(of: phase) { newPhase in
+            if newPhase == .active {
+                Store.shared.refresh()
+            }
         }
     }
 }
