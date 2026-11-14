@@ -9,7 +9,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install tools
         run: |
-          brew install xcodegen
+          brew install xcodegen ldid
           pip3 install pillow --break-system-packages || pip3 install pillow
       - name: Generate icon
         run: python3 scripts/make_icon.py
@@ -20,12 +20,18 @@ jobs:
           xcodebuild -project DataPulse.xcodeproj -scheme DataPulse \
             -configuration Release -sdk iphoneos -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
-      - name: Package IPA
+      - name: Package IPAs
         run: |
-          mkdir Payload
-          cp -R build/Build/Products/Release-iphoneos/DataPulse.app Payload/
-          zip -r DataPulse.ipa Payload
+          APP=build/Build/Products/Release-iphoneos/DataPulse.app
+          mkdir -p out/plain/Payload out/ts/Payload
+          cp -R "$APP" out/plain/Payload/
+          cp -R "$APP" out/ts/Payload/
+          ldid -Sscripts/trollstore.entitlements out/ts/Payload/DataPulse.app/DataPulse
+          (cd out/plain && zip -qr ../DataPulse.ipa Payload)
+          (cd out/ts && zip -qr ../DataPulse-TrollStore.ipa Payload)
       - uses: actions/upload-artifact@v4
         with:
           name: DataPulse-ipa
-          path: DataPulse.ipa
+          path: |
+            out/DataPulse.ipa
+            out/DataPulse-TrollStore.ipa
