@@ -1,0 +1,31 @@
+name: Build IPA
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          brew install xcodegen
+          pip3 install pillow --break-system-packages || pip3 install pillow
+      - name: Generate icon
+        run: python3 scripts/make_icon.py
+      - name: Generate project
+        run: xcodegen generate
+      - name: Build
+        run: |
+          xcodebuild -project DataPulse.xcodeproj -scheme DataPulse \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+      - name: Package IPA
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/DataPulse.app Payload/
+          zip -r DataPulse.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DataPulse-ipa
+          path: DataPulse.ipa
