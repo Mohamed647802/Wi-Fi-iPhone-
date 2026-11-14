@@ -13,6 +13,18 @@ struct UsageEntry: Codable, Hashable {
 struct AppState: Codable {
     var entries: [UsageEntry] = []
     var last: [String: UInt64]? = nil
+    var days: [DayUsage] = []
+    var apps: [AppUsage] = []
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        entries = try c.decodeIfPresent([UsageEntry].self, forKey: .entries) ?? []
+        last = try c.decodeIfPresent([String: UInt64].self, forKey: .last)
+        days = try c.decodeIfPresent([DayUsage].self, forKey: .days) ?? []
+        apps = try c.decodeIfPresent([AppUsage].self, forKey: .apps) ?? []
+    }
 }
 
 enum Interfaces {
@@ -58,6 +70,8 @@ final class Store: ObservableObject {
     @Published var state = AppState()
     @Published var refreshing = false
     @Published var lastUpdate: Date? = nil
+    @Published var dbStatus = ""
+    @Published var dbAvailable = false
 
     private let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("usage.json")
@@ -99,7 +113,7 @@ final class Store: ObservableObject {
         save()
     }
 
-    // يُستدعى عند فتح التطبيق أو التحديث اليدوي فقط
+    // يُستدعى عند فتح التطبيق أو التحديث اليدوي
     func refresh(_ done: (() -> Void)? = nil) {
         refreshing = true
         let cur = Interfaces.read()
@@ -113,18 +127,60 @@ final class Store: ObservableObject {
                     self.add(today, "cell", "SIM",
                              self.delta(cur["ci"]!, l["ci"]!), self.delta(cur["co"]!, l["co"]!))
                 } else {
-                    // أول تشغيل: كل الاستهلاك المتاح منذ إقلاع الجهاز
                     let boot = Store.dayString(Interfaces.bootDate())
                     self.add(boot, "wifi", "منذ تشغيل الجهاز", cur["wi"]!, cur["wo"]!)
                     self.add(boot, "cell", "SIM", cur["ci"]!, cur["co"]!)
                 }
                 self.state.last = cur
+                self.save()
+                self.loadSystemLog(done)
+            }
+        }
+    }
+
+    // قراءة سجل النظام (الأيام السابقة + التطبيقات) إن كانت الصلاحيات متاحة
+    private func loadSystemLog(_ done: (() -> Void)?) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (res, msg) = UsageDB.load()
+            DispatchQueue.main.async {
+                if let r = res {
+                    self.merge(r)
+                    self.dbAvailable = true
+                    self.dbStatus = r.report
+                } else {
+                    self.dbAvailable = false
+                    self.dbStatus = msg
+                }
                 self.lastUpdate = Date()
                 self.refreshing = false
                 self.save()
                 done?()
             }
         }
+    }
+
+    // دمج مع الأرشيف الداخلي: لا نستبدل يوماً بقيمة أصغر (حماية من تصفير النظام لسجله)
+    private func merge(_ r: DBResult) {
+        var dayMap: [String: DayUsage] = [:]
+        for d in state.days { dayMap[d.day] = d }
+        for n in r.days {
+            if let old = dayMap[n.day] {
+                let oldTotal = old.wifiDown + old.wifiUp + old.cellDown + old.cellUp
+                let newTotal = n.wifiDown + n.wifiUp + n.cellDown + n.cellUp
+                if oldTotal > newTotal { continue }
+            }
+            dayMap[n.day] = n
+        }
+        state.days = dayMap.values.sorted { $0.day < $1.day }
+
+        var appMap: [String: AppUsage] = [:]
+        for a in state.apps { appMap[a.day + "|" + a.name] = a }
+        for n in r.apps {
+            let key = n.day + "|" + n.name
+            if let old = appMap[key], old.wifi + old.cell > n.wifi + n.cell { continue }
+            appMap[key] = n
+        }
+        state.apps = Array(appMap.values)
     }
 
     func save() {
