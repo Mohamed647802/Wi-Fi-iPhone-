@@ -14,6 +14,12 @@ struct NetRow: Identifiable {
     var id: String { name }
 }
 
+struct AppRow: Identifiable {
+    let name: String
+    let total: UInt64
+    var id: String { name }
+}
+
 struct UsageView: View {
     let kind: String
     @EnvironmentObject var store: Store
@@ -27,22 +33,35 @@ struct UsageView: View {
     var accent: Color { kind == "wifi" ? Theme.wifi : Theme.cell }
     var title: String { kind == "wifi" ? "استهلاك الواي فاي" : "استهلاك بيانات الشريحة" }
 
-    var inRange: [UsageEntry] {
+    // هل لدينا سجل النظام (الأيام السابقة الدقيقة)؟
+    var useDB: Bool { !store.state.days.isEmpty }
+
+    func inRangeDay(_ d: String) -> Bool {
         let f = Store.dayString(from)
         let t = Store.dayString(to)
-        return store.entries.filter { $0.kind == kind && $0.day >= f && $0.day <= t }
+        return d >= f && d <= t
     }
 
-    var rows: [UsageEntry] {
-        guard let s = ssid else { return inRange }
-        return inRange.filter { $0.ssid == s }
+    var trackedInRange: [UsageEntry] {
+        store.entries.filter { $0.kind == kind && inRangeDay($0.day) }
     }
 
-    var down: UInt64 { rows.reduce(UInt64(0)) { $0 + $1.down } }
-    var up: UInt64 { rows.reduce(UInt64(0)) { $0 + $1.up } }
+    var trackedRows: [UsageEntry] {
+        guard let s = ssid else { return trackedInRange }
+        return trackedInRange.filter { $0.ssid == s }
+    }
 
     var daily: [DayRow] {
-        let groups = Dictionary(grouping: rows, by: { $0.day })
+        if useDB {
+            var out: [DayRow] = []
+            for d in store.state.days where inRangeDay(d.day) {
+                let dn = kind == "wifi" ? d.wifiDown : d.cellDown
+                let u = kind == "wifi" ? d.wifiUp : d.cellUp
+                out.append(DayRow(day: d.day, down: dn, up: u))
+            }
+            return out.sorted { $0.day < $1.day }
+        }
+        let groups = Dictionary(grouping: trackedRows, by: { $0.day })
         var out: [DayRow] = []
         for (day, list) in groups {
             let d = list.reduce(UInt64(0)) { $0 + $1.down }
@@ -52,14 +71,30 @@ struct UsageView: View {
         return out.sorted { $0.day < $1.day }
     }
 
+    var down: UInt64 { daily.reduce(UInt64(0)) { $0 + $1.down } }
+    var up: UInt64 { daily.reduce(UInt64(0)) { $0 + $1.up } }
+
     var networks: [NetRow] {
-        let groups = Dictionary(grouping: inRange, by: { $0.ssid })
+        let groups = Dictionary(grouping: trackedInRange, by: { $0.ssid })
         var out: [NetRow] = []
         for (name, list) in groups {
             let t = list.reduce(UInt64(0)) { $0 + $1.down + $1.up }
             out.append(NetRow(name: name, total: t))
         }
         return out.sorted { $0.total > $1.total }
+    }
+
+    var topApps: [AppRow] {
+        var sums: [String: UInt64] = [:]
+        for a in store.state.apps where inRangeDay(a.day) {
+            let v = kind == "wifi" ? a.wifi : a.cell
+            sums[a.name, default: 0] += v
+        }
+        var out: [AppRow] = []
+        for (name, total) in sums where total > 0 {
+            out.append(AppRow(name: name, total: total))
+        }
+        return Array(out.sorted { $0.total > $1.total }.prefix(12))
     }
 
     func setRange(_ days: Int) {
@@ -69,16 +104,15 @@ struct UsageView: View {
 
     func setAll() {
         to = Date()
-        let first = store.entries.filter { $0.kind == kind }.map { $0.day }.min()
-        if let f = first {
+        var all: [String] = store.entries.filter { $0.kind == kind }.map { $0.day }
+        all.append(contentsOf: store.state.days.map { $0.day })
+        if let f = all.min() {
             let p = DateFormatter()
             p.dateFormat = "yyyy-MM-dd"
             p.locale = Locale(identifier: "en_US_POSIX")
             if let d = p.date(from: f) { from = d }
         }
     }
-
-    var cardBg: some ShapeStyle { Color.white.opacity(0.07) }
 
     var body: some View {
         ScrollView {
@@ -90,13 +124,12 @@ struct UsageView: View {
                     tile("arrow.up.circle.fill", "رفع", fmt(up))
                 }
                 rangeCard
-                if kind == "cell" { manualButton }
-                if kind == "wifi" && !networks.isEmpty { networksGrid }
+                if kind == "cell" && !useDB { manualButton }
                 if !daily.isEmpty { chartCard }
                 dailyList
-                Text("ملاحظة: أقدم بيانات يوفرها النظام هي منذ آخر إقلاع للجهاز، وتُنسب لتاريخ الإقلاع. الاستهلاك بين كل فتحتين يُنسب للشبكة المتصل بها وقت الفتح.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if !topApps.isEmpty { appsList }
+                if kind == "wifi" && !networks.isEmpty { networksGrid }
+                sourceCard
             }
             .padding()
         }
@@ -129,7 +162,7 @@ struct UsageView: View {
     var totalCard: some View {
         Card {
             VStack(alignment: .leading, spacing: 4) {
-                Text(ssid == nil ? "المجموع للفترة المحددة" : "المجموع • \(ssid ?? "")")
+                Text(ssid == nil || useDB ? "المجموع للفترة المحددة" : "المجموع • \(ssid ?? "")")
                     .font(.footnote).foregroundStyle(.secondary)
                 Text(fmt(down + up))
                     .font(.system(size: 40, weight: .bold, design: .rounded))
@@ -160,41 +193,6 @@ struct UsageView: View {
                 .frame(maxWidth: .infinity)
                 .padding(12)
                 .background(accent.opacity(0.2), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .buttonStyle(.plain)
-    }
-
-    var networksGrid: some View {
-        VStack(spacing: 12) {
-            Text("الشبكات").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                ForEach(networks) { n in
-                    networkTile(n)
-                }
-            }
-        }
-    }
-
-    func networkTile(_ n: NetRow) -> some View {
-        let selected = (ssid == n.name)
-        return Button {
-            ssid = selected ? nil : n.name
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                Image(systemName: "wifi").foregroundStyle(accent)
-                Spacer()
-                Text(n.name).font(.subheadline.bold()).lineLimit(1)
-                Text(fmt(n.total)).font(.caption).foregroundStyle(.secondary)
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .aspectRatio(1, contentMode: .fit)
-            .background(selected ? accent.opacity(0.25) : Color.white.opacity(0.07),
-                        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(selected ? accent : Color.white.opacity(0.1))
-            )
         }
         .buttonStyle(.plain)
     }
@@ -233,6 +231,76 @@ struct UsageView: View {
                                 .font(.caption2).foregroundStyle(.secondary)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    var appsList: some View {
+        VStack(spacing: 12) {
+            Text("أكثر التطبيقات استخداماً").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(topApps) { a in
+                Card {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(a.name).font(.subheadline.bold()).lineLimit(1)
+                            Spacer()
+                            Text(fmt(a.total)).font(.subheadline).foregroundStyle(accent)
+                        }
+                        ProgressView(value: Double(a.total), total: Double(topApps.first?.total ?? 1))
+                            .tint(accent)
+                    }
+                }
+            }
+        }
+    }
+
+    var networksGrid: some View {
+        VStack(spacing: 12) {
+            Text(useDB ? "الشبكات (منذ تثبيت التطبيق)" : "الشبكات")
+                .font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                ForEach(networks) { n in
+                    networkTile(n)
+                }
+            }
+        }
+    }
+
+    func networkTile(_ n: NetRow) -> some View {
+        let selected = (ssid == n.name) && !useDB
+        return Button {
+            if !useDB { ssid = (ssid == n.name) ? nil : n.name }
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Image(systemName: "wifi").foregroundStyle(accent)
+                Spacer()
+                Text(n.name).font(.subheadline.bold()).lineLimit(1)
+                Text(fmt(n.total)).font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .aspectRatio(1, contentMode: .fit)
+            .background(selected ? accent.opacity(0.25) : Color.white.opacity(0.07),
+                        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(selected ? accent : Color.white.opacity(0.1))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    var sourceCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(useDB ? "المصدر: سجل استهلاك النظام (دقيق، يشمل الأيام السابقة)"
+                           : "المصدر: عدّادات التطبيق (من لحظة التثبيت فقط)")
+                    .font(.footnote.bold())
+                    .foregroundStyle(useDB ? accent : Color.orange)
+                if !store.dbStatus.isEmpty {
+                    Text(store.dbStatus)
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
             }
         }
